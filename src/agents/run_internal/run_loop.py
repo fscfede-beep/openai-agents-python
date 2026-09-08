@@ -865,7 +865,7 @@ async def _finalize_streamed_interruption(
 T = TypeVar("T")
 
 
-@dataclass(frozen=True)
+@_dc.dataclass(frozen=True)
 class _PendingStreamedFunctionCall:
     call_id: str
     name: str
@@ -1002,6 +1002,8 @@ async def _reconcile_stream_abort_if_needed(
             "Failed to reconcile streamed tool calls after abort.",
             error,
         )
+        if cancellation is not None:
+            raise cancellation from None
         return
 
     pending.clear()
