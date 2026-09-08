@@ -889,8 +889,16 @@ def _record_stream_event_for_abort_reconciliation(
         return
     if event_type not in {"response.output_item.added", "response.output_item.done"}:
         return
+
     item = getattr(event, "item", None)
-    if getattr(item, "type", None) != "function_call":
+    item_type = getattr(item, "type", None)
+    call_id = getattr(item, "call_id", None)
+    if item_type == "function_call_output":
+        if isinstance(call_id, str):
+            pending.pop(call_id, None)
+        return
+
+    if item_type != "function_call":
         return
     call_id = getattr(item, "call_id", None)
     if not isinstance(call_id, str) or not call_id:
