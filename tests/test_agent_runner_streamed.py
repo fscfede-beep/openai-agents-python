@@ -147,6 +147,46 @@ def _ws_terminal_response_frame(event_type: str, response_id: str, sequence_numb
 
 
 
+def test_stream_abort_reconciliation_removes_completed_function_call() -> None:
+    from agents.run_internal.run_loop import (
+        _PendingStreamedFunctionCall,
+        _build_stream_abort_reconciliation_input,
+        _record_stream_event_for_abort_reconciliation,
+    )
+
+    pending = {
+        "call-1": _PendingStreamedFunctionCall(
+            call_id="call-1",
+            name="lookup",
+            namespace=None,
+            caller=None,
+        )
+    }
+
+    output_item = type(
+        "Item",
+        (),
+        {
+            "type": "function_call_output",
+            "call_id": "call-1",
+        },
+    )()
+
+    _record_stream_event_for_abort_reconciliation(
+        pending,
+        type(
+            "Event",
+            (),
+            {
+                "type": "response.output_item.done",
+                "item": output_item,
+            },
+        )(),
+    )
+
+    assert _build_stream_abort_reconciliation_input(pending) == []
+
+
 def test_stream_abort_reconciliation_tracks_and_clears_function_calls() -> None:
     from agents.run_internal.run_loop import (
         _PendingStreamedFunctionCall,
