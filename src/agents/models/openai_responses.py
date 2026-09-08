@@ -251,6 +251,60 @@ def _usage_from_response(response: Response) -> Usage:
     return Usage(requests=_requests_for_response_without_usage(response))
 
 
+
+
+@dataclass
+class _PendingStreamedFunctionCall:
+    call_id: str
+    name: str
+    namespace: str | None
+    caller: object | None
+
+
+def _track_streamed_function_call(
+    pending: dict[str, _PendingStreamedFunctionCall],
+    chunk: object,
+) -> None:
+    chunk_type = getattr(chunk, "type", None)
+    if chunk_type != "response.output_item.done":
+        return
+    item = getattr(chunk, "item", None)
+    if getattr(item, "type", None) != "function_call":
+        return
+    call_id = getattr(item, "call_id", None)
+    if not isinstance(call_id, str) or not call_id:
+        return
+    name = getattr(item, "name", None)
+    namespace = getattr(item, "namespace", None)
+    pending[call_id] = _PendingStreamedFunctionCall(
+        call_id=call_id,
+        name=name if isinstance(name, str) and name else call_id,
+        namespace=namespace if isinstance(namespace, str) else None,
+        caller=getattr(item, "caller", None),
+    )
+
+
+def _build_stream_abort_reconciliation_input(
+    pending: Mapping[str, _PendingStreamedFunctionCall],
+) -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    for call in pending.values():
+        item: dict[str, object] = {
+            "type": "function_call_output",
+            "call_id": call.call_id,
+            "output": "aborted",
+            "status": "incomplete",
+        }
+        if call.name:
+            item["name"] = call.name
+        if call.namespace is not None:
+            item["namespace"] = call.namespace
+        if call.caller is not None:
+            item["caller"] = call.caller
+        items.append(item)
+    return items
+
+
 async def _no_stream_cleanup() -> None:
     """Provide a no-op cleanup callback for an externally owned stream."""
 
@@ -693,9 +747,17 @@ class OpenAIResponsesModel(Model):
                 terminal_failure_error: ModelBehaviorError | None = None
                 yielded_terminal_event = False
                 close_stream_in_background = False
+                pending_streamed_function_calls: dict[str, _PendingStreamedFunctionCall] = {}
+                streamed_response_id: str | None = None
                 try:
                     async for chunk in stream:
+                        _track_streamed_function_call(pending_streamed_function_calls, chunk)
                         chunk_type = getattr(chunk, "type", None)
+                        if chunk_type == "response.created":
+                            created_response = getattr(chunk, "response", None)
+                            created_id = getattr(created_response, "id", None)
+                            if isinstance(created_id, str):
+                                streamed_response_id = created_id
                         if isinstance(chunk, ResponseCompletedEvent):
                             final_response = chunk.response
                             if (
@@ -755,6 +817,34 @@ class OpenAIResponsesModel(Model):
                 except asyncio.CancelledError:
                     close_stream_in_background = True
                     self._schedule_async_iterator_close(stream)
+
+                    if pending_streamed_function_calls and (conversation_id is not None or previous_response_id is not None):
+                        try:
+                            reconciliation_input = _build_stream_abort_reconciliation_input(
+                                pending_streamed_function_calls
+                            )
+                            continuation_previous_response_id = (
+                                previous_response_id
+                                if conversation_id is not None
+                                else streamed_response_id or previous_response_id
+                            )
+                            await self._client.responses.create(
+                                model=self.model,
+                                input=cast(Any, reconciliation_input),
+                                conversation=conversation_id if conversation_id is not None else omit,
+                                previous_response_id=(
+                                    continuation_previous_response_id
+                                    if continuation_previous_response_id is not None
+                                    else omit
+                                ),
+                                stream=False,
+                            )
+                        except Exception as reconciliation_error:
+                            log_model_action_debug(
+                                logger,
+                                "Ignoring Responses stream-abort reconciliation failure",
+                                reconciliation_error,
+                            )
                     raise
                 finally:
                     if not close_stream_in_background:
