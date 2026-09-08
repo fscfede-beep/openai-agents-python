@@ -236,6 +236,164 @@ def _response_error_frame(code: str, message: str, sequence_number: int) -> str:
     )
 
 
+def test_build_stream_abort_reconciliation_input_is_idempotent_and_complete() -> None:
+    from agents.models.openai_responses import (
+        _PendingStreamedFunctionCall,
+        _build_stream_abort_reconciliation_input,
+    )
+
+    pending = {
+        "call-1": _PendingStreamedFunctionCall(
+            call_id="call-1",
+            name="lookup",
+            namespace="ns",
+            caller={"type": "direct"},
+        ),
+        "call-2": _PendingStreamedFunctionCall(
+            call_id="call-2",
+            name="other",
+            namespace=None,
+            caller=None,
+        ),
+    }
+
+    first = _build_stream_abort_reconciliation_input(pending)
+    second = _build_stream_abort_reconciliation_input(pending)
+
+    assert first == second
+    assert first == [
+        {
+            "type": "function_call_output",
+            "call_id": "call-1",
+            "output": "aborted",
+            "status": "incomplete",
+            "name": "lookup",
+            "namespace": "ns",
+            "caller": {"type": "direct"},
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call-2",
+            "output": "aborted",
+            "status": "incomplete",
+            "name": "other",
+        },
+    ]
+
+
+def test_track_streamed_function_call_ignores_non_function_events() -> None:
+    from agents.models.openai_responses import (
+        _PendingStreamedFunctionCall,
+        _track_streamed_function_call,
+    )
+
+    pending: dict[str, _PendingStreamedFunctionCall] = {}
+
+    _track_streamed_function_call(pending, type("Event", (), {"type": "response.created"})())
+    _track_streamed_function_call(
+        pending,
+        type(
+            "Event",
+            (),
+            {
+                "type": "response.output_item.done",
+                "item": type("Item", (), {"type": "message", "call_id": "ignored"})(),
+            },
+        )(),
+    )
+
+    assert pending == {}
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_reconciles_pending_function_call_before_propagating_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeResponses:
+        def __init__(self) -> None:
+            self.create_calls: list[dict[str, Any]] = []
+
+        async def create(self, **kwargs: Any) -> Response:
+            self.create_calls.append(kwargs)
+            return get_response_obj([])
+
+    class FakeClient(DummyWSClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.responses = FakeResponses()
+
+    client = FakeClient()
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+
+    class CancellableStream:
+        def __init__(self) -> None:
+            self.phase = 0
+
+        def __aiter__(self) -> CancellableStream:
+            return self
+
+        async def __anext__(self) -> Any:
+            if self.phase == 0:
+                self.phase += 1
+                return type(
+                    "Event",
+                    (),
+                    {
+                        "type": "response.output_item.done",
+                        "item": type(
+                            "Item",
+                            (),
+                            {
+                                "type": "function_call",
+                                "call_id": "call-1",
+                                "name": "lookup",
+                                "namespace": None,
+                                "caller": None,
+                            },
+                        )(),
+                    },
+                )()
+            raise asyncio.CancelledError
+
+        async def aclose(self) -> None:
+            return None
+
+    stream = CancellableStream()
+
+    async def fake_fetch_response(*args: Any, **kwargs: Any) -> CancellableStream:
+        return stream
+
+    monkeypatch.setattr(model, "_fetch_response", fake_fetch_response)
+
+    iterator = cast(AsyncIterator[Any], model.stream_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id="resp-original",
+    ))
+
+    await iterator.__anext__()
+    with pytest.raises(asyncio.CancelledError):
+        await iterator.__anext__()
+
+    assert len(client.responses.create_calls) == 1
+    call = client.responses.create_calls[0]
+    assert call["previous_response_id"] == "resp-original"
+    assert call["input"] == [
+        {
+            "type": "function_call_output",
+            "call_id": "call-1",
+            "output": "aborted",
+            "status": "incomplete",
+        }
+    ]
+    assert call["stream"] is False
+
 def _connection_closed_error(message: str) -> Exception:
     class ConnectionClosedError(Exception):
         pass
