@@ -186,6 +186,14 @@ class ModalCloudBucketMountStrategy(MountStrategyBase):
                     ),
                     context={"mount_type": mount.type},
                 )
+            if self.oidc_auth_role_arn is not None and r2_credentials:
+                raise MountConfigError(
+                    message=(
+                        "modal cloud bucket mounts do not support both inline credentials "
+                        "and oidc_auth_role_arn"
+                    ),
+                    context={"mount_type": mount.type},
+                )
             return ModalCloudBucketMountConfig(
                 bucket_name=mount.bucket,
                 bucket_endpoint_url=(
@@ -194,6 +202,7 @@ class ModalCloudBucketMountStrategy(MountStrategyBase):
                 credentials=r2_credentials or None,
                 secret_name=self.secret_name,
                 secret_environment_name=self.secret_environment_name,
+                oidc_auth_role_arn=self.oidc_auth_role_arn,
                 read_only=mount.read_only,
             )
 
