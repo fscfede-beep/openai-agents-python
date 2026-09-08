@@ -833,6 +833,27 @@ def test_modal_cloud_bucket_mount_strategy_builds_s3_config_with_oidc(
     assert config.read_only is False
 
 
+def test_modal_cloud_bucket_mount_strategy_rejects_oidc_with_inline_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+    strategy = modal_module.ModalCloudBucketMountStrategy(
+        oidc_auth_role_arn="arn:aws:iam::123456789012:role/modal-s3-reader"
+    )
+    mount = S3Mount(
+        bucket="bucket",
+        access_key_id="access-key",
+        secret_access_key="secret-key",
+        mount_strategy=strategy,
+    )
+
+    with pytest.raises(
+        modal_module.MountConfigError,
+        match="do not support both inline credentials and oidc_auth_role_arn",
+    ):
+        strategy._build_modal_cloud_bucket_mount_config(mount)  # noqa: SLF001
+
+
 def test_modal_cloud_bucket_mount_strategy_rejects_oidc_with_secret(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
