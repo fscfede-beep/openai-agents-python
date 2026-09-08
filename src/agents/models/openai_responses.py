@@ -266,14 +266,17 @@ def _track_streamed_function_call(
     chunk: object,
 ) -> None:
     chunk_type = getattr(chunk, "type", None)
-    if chunk_type != "response.output_item.done":
+    if chunk_type not in {"response.output_item.added", "response.output_item.done"}:
         return
+
     item = getattr(chunk, "item", None)
     if getattr(item, "type", None) != "function_call":
         return
+
     call_id = getattr(item, "call_id", None)
     if not isinstance(call_id, str) or not call_id:
         return
+
     name = getattr(item, "name", None)
     namespace = getattr(item, "namespace", None)
     pending[call_id] = _PendingStreamedFunctionCall(
@@ -282,6 +285,21 @@ def _track_streamed_function_call(
         namespace=namespace if isinstance(namespace, str) else None,
         caller=getattr(item, "caller", None),
     )
+
+
+def _clear_streamed_function_calls_on_terminal_event(
+    pending: dict[str, _PendingStreamedFunctionCall],
+    chunk: object,
+) -> None:
+    chunk_type = getattr(chunk, "type", None)
+    if chunk_type in {
+        "response.completed",
+        "response.failed",
+        "response.incomplete",
+        "error",
+        "response.error",
+    }:
+        pending.clear()
 
 
 def _build_stream_abort_reconciliation_input(
@@ -321,7 +339,7 @@ async def _settle_stream_abort_reconciliation(
 
     try:
         task.result()
-    except Exception as error:
+    except BaseException as error:
         log_model_action_debug(
             logger,
             "Ignoring Responses stream-abort reconciliation failure",
@@ -779,6 +797,9 @@ class OpenAIResponsesModel(Model):
                 try:
                     async for chunk in stream:
                         _track_streamed_function_call(pending_streamed_function_calls, chunk)
+                        _clear_streamed_function_calls_on_terminal_event(
+                            pending_streamed_function_calls, chunk
+                        )
                         chunk_type = getattr(chunk, "type", None)
                         if chunk_type == "response.created":
                             created_response = getattr(chunk, "response", None)
