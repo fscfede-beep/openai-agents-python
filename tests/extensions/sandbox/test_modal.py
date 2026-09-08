@@ -811,6 +811,25 @@ async def test_modal_sandbox_create_passes_modal_cloud_bucket_mounts(
     assert mount.read_only is False
 
 
+def test_modal_cloud_bucket_mount_strategy_builds_r2_config_with_oidc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+    strategy = modal_module.ModalCloudBucketMountStrategy(
+        oidc_auth_role_arn="arn:aws:iam::123456789012:role/modal-r2-reader"
+    )
+    mount = R2Mount(
+        bucket="bucket",
+        account_id="abc123accountid",
+        mount_strategy=strategy,
+    )
+
+    config = strategy._build_modal_cloud_bucket_mount_config(mount)  # noqa: SLF001
+
+    assert config.credentials is None
+    assert config.oidc_auth_role_arn == "arn:aws:iam::123456789012:role/modal-r2-reader"
+
+
 def test_modal_cloud_bucket_mount_strategy_builds_s3_config_with_oidc(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
