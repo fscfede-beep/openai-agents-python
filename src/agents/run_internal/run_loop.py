@@ -942,6 +942,7 @@ async def _reconcile_stream_abort_if_needed(
     prompt: ResponsePromptParam | None,
     run_config: RunConfig,
     context_wrapper: RunContextWrapper[Any],
+    streamed_result: RunResultStreaming,
 ) -> None:
     if server_conversation_tracker is None or not pending:
         return
@@ -1006,6 +1007,9 @@ async def _reconcile_stream_abort_if_needed(
     pending.clear()
     context_wrapper.usage.add(response.usage)
     server_conversation_tracker.track_server_items(response)
+    streamed_result._conversation_id = server_conversation_tracker.conversation_id
+    streamed_result._previous_response_id = server_conversation_tracker.previous_response_id
+    streamed_result._auto_previous_response_id = server_conversation_tracker.auto_previous_response_id
     if cancellation is not None:
         raise cancellation from None
 
@@ -2493,6 +2497,7 @@ async def run_single_turn_streamed(
             streamed_response_id=streamed_response_id,
             instructions=filtered.instructions,
             prompt=prompt_config,
+            streamed_result=streamed_result,
             run_config=run_config,
             context_wrapper=context_wrapper,
         )
