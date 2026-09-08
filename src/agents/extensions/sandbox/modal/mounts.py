@@ -23,7 +23,6 @@ class ModalCloudBucketMountConfig:
     secret_name: str | None = None
     secret_environment_name: str | None = None
     oidc_auth_role_arn: str | None = None
-    oidc_auth_role_arn: str | None = None
     read_only: bool = True
 
 
@@ -153,6 +152,22 @@ class ModalCloudBucketMountStrategy(MountStrategyBase):
                     ),
                     context={"mount_type": mount.type},
                 )
+            if self.oidc_auth_role_arn is not None and s3_credentials:
+                raise MountConfigError(
+                    message=(
+                        "modal cloud bucket mounts do not support both inline credentials "
+                        "and oidc_auth_role_arn"
+                    ),
+                    context={"mount_type": mount.type},
+                )
+            if self.oidc_auth_role_arn is not None and s3_credentials:
+                raise MountConfigError(
+                    message=(
+                        "modal cloud bucket mounts do not support both inline credentials "
+                        "and oidc_auth_role_arn"
+                    ),
+                    context={"mount_type": mount.type},
+                )
             return ModalCloudBucketMountConfig(
                 bucket_name=mount.bucket,
                 bucket_endpoint_url=mount.endpoint_url,
@@ -211,6 +226,14 @@ class ModalCloudBucketMountStrategy(MountStrategyBase):
                     message=(
                         "modal cloud bucket mounts do not support both inline credentials "
                         "and secret_name"
+                    ),
+                    context={"mount_type": mount.type},
+                )
+            if self.oidc_auth_role_arn is not None and gcs_credentials is not None:
+                raise MountConfigError(
+                    message=(
+                        "modal cloud bucket mounts do not support both inline credentials "
+                        "and oidc_auth_role_arn"
                     ),
                     context={"mount_type": mount.type},
                 )
