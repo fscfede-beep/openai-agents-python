@@ -118,6 +118,7 @@ class WorkspaceEditor:
                 except (FileNotFoundError, WorkspaceReadNotFoundError):
                     pass
                 else:
+                    handle.close()
                     raise ApplyPatchDestinationExistsError(path=moved_display_path)
             await self._write_text(moved_destination, updated_text)
             if moved_destination != destination:
