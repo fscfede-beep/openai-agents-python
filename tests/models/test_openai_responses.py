@@ -394,6 +394,57 @@ async def test_stream_response_reconciles_pending_function_call_before_propagati
     ]
     assert call["stream"] is False
 
+def test_track_streamed_function_call_records_added_event_before_done() -> None:
+    from agents.models.openai_responses import (
+        _PendingStreamedFunctionCall,
+        _track_streamed_function_call,
+    )
+
+    pending: dict[str, _PendingStreamedFunctionCall] = {}
+    item = type(
+        "Item",
+        (),
+        {
+            "type": "function_call",
+            "call_id": "call-early",
+            "name": "lookup",
+            "namespace": None,
+            "caller": None,
+        },
+    )()
+
+    _track_streamed_function_call(
+        pending,
+        type("Event", (), {"type": "response.output_item.added", "item": item})(),
+    )
+
+    assert "call-early" in pending
+    assert pending["call-early"].name == "lookup"
+
+
+def test_terminal_response_clears_pending_streamed_function_calls() -> None:
+    from agents.models.openai_responses import (
+        _PendingStreamedFunctionCall,
+        _clear_streamed_function_calls_on_terminal_event,
+    )
+
+    pending = {
+        "call-1": _PendingStreamedFunctionCall(
+            call_id="call-1",
+            name="lookup",
+            namespace=None,
+            caller=None,
+        )
+    }
+
+    _clear_streamed_function_calls_on_terminal_event(
+        pending,
+        type("Event", (), {"type": "response.completed"})(),
+    )
+
+    assert pending == {}
+
+
 def _connection_closed_error(message: str) -> Exception:
     class ConnectionClosedError(Exception):
         pass
