@@ -1,4 +1,5 @@
 name: Tests
+# Validation-only branch for PR #4906 HEAD; no production behavior change.
 
 on:
   push:
