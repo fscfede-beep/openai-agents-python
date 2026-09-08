@@ -865,6 +865,151 @@ async def _finalize_streamed_interruption(
 T = TypeVar("T")
 
 
+@dataclass(frozen=True)
+class _PendingStreamedFunctionCall:
+    call_id: str
+    name: str
+    namespace: str | None
+    caller: object | None
+
+
+def _record_stream_event_for_abort_reconciliation(
+    pending: dict[str, _PendingStreamedFunctionCall],
+    event: object,
+) -> None:
+    event_type = getattr(event, "type", None)
+    if event_type in {
+        "response.completed",
+        "response.failed",
+        "response.incomplete",
+        "error",
+        "response.error",
+    }:
+        pending.clear()
+        return
+    if event_type not in {"response.output_item.added", "response.output_item.done"}:
+        return
+    item = getattr(event, "item", None)
+    if getattr(item, "type", None) != "function_call":
+        return
+    call_id = getattr(item, "call_id", None)
+    if not isinstance(call_id, str) or not call_id:
+        return
+    name = getattr(item, "name", None)
+    namespace = getattr(item, "namespace", None)
+    pending[call_id] = _PendingStreamedFunctionCall(
+        call_id=call_id,
+        name=name if isinstance(name, str) and name else call_id,
+        namespace=namespace if isinstance(namespace, str) else None,
+        caller=getattr(item, "caller", None),
+    )
+
+
+def _build_stream_abort_reconciliation_input(
+    pending: dict[str, _PendingStreamedFunctionCall],
+) -> list[TResponseInputItem]:
+    result: list[TResponseInputItem] = []
+    for call in pending.values():
+        item: dict[str, object] = {
+            "type": "function_call_output",
+            "call_id": call.call_id,
+            "output": "aborted",
+            "status": "incomplete",
+        }
+        if call.name:
+            item["name"] = call.name
+        if call.namespace is not None:
+            item["namespace"] = call.namespace
+        if call.caller is not None:
+            item["caller"] = call.caller
+        result.append(cast(TResponseInputItem, item))
+    return result
+
+
+async def _reconcile_stream_abort_if_needed(
+    *,
+    pending: dict[str, _PendingStreamedFunctionCall],
+    model: Any,
+    model_settings: Any,
+    output_schema: AgentOutputSchemaBase | None,
+    all_tools: list[Tool],
+    handoffs: list[Handoff],
+    server_conversation_tracker: OpenAIServerConversationTracker | None,
+    previous_response_id: str | None,
+    conversation_id: str | None,
+    streamed_response_id: str | None,
+    instructions: str | None,
+    prompt: ResponsePromptParam | None,
+    run_config: RunConfig,
+    context_wrapper: RunContextWrapper[Any],
+) -> None:
+    if server_conversation_tracker is None or not pending:
+        return
+
+    reconciliation_input = _build_stream_abort_reconciliation_input(pending)
+    continuation_previous_response_id = (
+        previous_response_id
+        if conversation_id is not None
+        else streamed_response_id or previous_response_id
+    )
+
+    async def rewind() -> None:
+        server_conversation_tracker.rewind_input(reconciliation_input)
+
+    reconciliation_task = asyncio.ensure_future(
+        get_response_with_retry(
+            get_response=lambda: model.get_response(
+                system_instructions=instructions,
+                input=reconciliation_input,
+                model_settings=model_settings,
+                tools=all_tools,
+                output_schema=output_schema,
+                handoffs=handoffs,
+                tracing=get_model_tracing_impl(
+                    run_config.tracing_disabled,
+                    run_config.trace_include_sensitive_data,
+                ),
+                previous_response_id=continuation_previous_response_id,
+                conversation_id=conversation_id,
+                prompt=prompt,
+            ),
+            rewind=rewind,
+            retry_settings=model_settings.retry,
+            get_retry_advice=model.get_retry_advice,
+            previous_response_id=continuation_previous_response_id,
+            conversation_id=conversation_id,
+            timeout=model_settings.timeout,
+            replay_unsafe_request=any(
+                isinstance(tool, ProgrammaticToolCallingTool) for tool in all_tools
+            ),
+        )
+    )
+
+    cancellation: asyncio.CancelledError | None = None
+    while not reconciliation_task.done():
+        try:
+            await asyncio.shield(reconciliation_task)
+        except asyncio.CancelledError as error:
+            if cancellation is None:
+                cancellation = error
+
+    try:
+        response = reconciliation_task.result()
+    except BaseException as error:
+        log_model_and_tool_action_debug(
+            logger,
+            "Failed to reconcile streamed tool calls after abort.",
+            error,
+        )
+        return
+
+    pending.clear()
+    context_wrapper.usage.add(response.usage)
+    server_conversation_tracker.track_server_items(response)
+    if cancellation is not None:
+        raise cancellation from None
+
+
 async def start_streaming(
     starting_input: str | list[TResponseInputItem],
     streamed_result: RunResultStreaming,
@@ -2146,6 +2291,8 @@ async def run_single_turn_streamed(
     final_response: ModelResponse | None = None
     streamed_response_output: list[ResponseOutputItem] = []
     emitted_model_item_occurrence_keys: set[str] = set()
+    abort_reconciliation_pending: dict[str, _PendingStreamedFunctionCall] = {}
+    streamed_response_id: str | None = None
 
     if server_conversation_tracker is not None:
         items_for_input = (
@@ -2273,6 +2420,14 @@ async def run_single_turn_streamed(
     # explicitly instead of waiting for garbage collection to finalize the generator chain.
     async with aclosing(model_run_context_stream(retry_stream, tool_use_tracker)) as model_events:
         async for event in model_events:
+            _record_stream_event_for_abort_reconciliation(
+                abort_reconciliation_pending, event
+            )
+            if getattr(event, "type", None) == "response.created":
+                created_response = getattr(event, "response", None)
+                created_id = getattr(created_response, "id", None)
+                if isinstance(created_id, str):
+                    streamed_response_id = created_id
             streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
 
             terminal_response: Response | None = None
@@ -2324,6 +2479,24 @@ async def run_single_turn_streamed(
 
             if isinstance(event, ResponseOutputItemDoneEvent):
                 streamed_response_output.append(event.item)
+    except asyncio.CancelledError:
+        await _reconcile_stream_abort_if_needed(
+            pending=abort_reconciliation_pending,
+            model=model,
+            model_settings=model_settings,
+            output_schema=output_schema,
+            all_tools=all_tools,
+            handoffs=handoffs,
+            server_conversation_tracker=server_conversation_tracker,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            streamed_response_id=streamed_response_id,
+            instructions=filtered.instructions,
+            prompt=prompt_config,
+            run_config=run_config,
+            context_wrapper=context_wrapper,
+        )
+        raise
 
     if final_response is None:
         raise ModelBehaviorError("Model did not produce a final response!")
