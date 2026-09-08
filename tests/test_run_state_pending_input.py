@@ -195,11 +195,18 @@ async def test_pending_input_preserves_provider_data_on_serialization_round_trip
         }
     )
 
-    restored = await RunState.from_json(agent, state.to_json())
+    payload = state.to_json()
+    assert payload["pending_input"][0]["provider_data"] == provider_data
+
+    restored = await RunState.from_json(agent, payload)
     restored_item = restored.pending_input[0]
+    restored_from_string = await RunState.from_string(agent, state.to_string())
+    restored_string_item = restored_from_string.pending_input[0]
 
     assert isinstance(restored_item, dict)
     assert restored_item["provider_data"] == provider_data
+    assert isinstance(restored_string_item, dict)
+    assert restored_string_item["provider_data"] == provider_data
 
 
 @pytest.mark.asyncio
