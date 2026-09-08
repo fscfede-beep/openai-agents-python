@@ -233,6 +233,32 @@ class TestOpenAIConversationsSessionBasicOperations:
         mock_openai_client.conversations.items.list.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_get_items_large_limit_is_applied_locally(
+        self, mock_openai_client
+    ):
+        """Session history limit must not be forwarded as provider page size."""
+        session = OpenAIConversationsSession(
+            conversation_id="test_id", openai_client=mock_openai_client
+        )
+
+        async def items():
+            for index in range(1500):
+                yield MagicMock(model_dump=lambda index=index: {"id": str(index)})
+
+        mock_openai_client.conversations.items.list = MagicMock(return_value=items())
+
+        result = await session.get_items(limit=1000)
+
+        mock_openai_client.conversations.items.list.assert_called_once_with(
+            conversation_id="test_id",
+            order="desc",
+        )
+        assert len(result) == 1000
+        assert result[0]["id"] == "500"
+        assert result[-1]["id"] == "1499"
+
+
+    @pytest.mark.asyncio
     async def test_add_items_simple(self, mock_openai_client):
         """Test adding items to the conversation."""
         session = OpenAIConversationsSession(
