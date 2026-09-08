@@ -102,6 +102,7 @@ from .agent_runner_helpers import (
     apply_resumed_conversation_settings,
     attach_usage_to_span,
     get_unsent_tool_call_ids_for_interrupted_state,
+    reject_unrecoverable_terminal_state,
     snapshot_usage,
     usage_delta,
     validate_output_guardrails_with_server_managed_conversation,
@@ -628,6 +629,10 @@ async def _finalize_streamed_final_output(
     # Saved as one ordered batch so the session mirrors the model response. Doing it in two
     # halves would both reorder the turn and, because the first save advances the turn's
     # persisted-item count, make the second one a no-op.
+    # The output, its guardrails, and its terminal hooks are all complete, so from here until
+    # the turn is persisted this run owns a result no resume can reproduce.
+    if streamed_result._state is not None:
+        streamed_result._state._terminal_unrecoverable = True
     if on_persisted_after_guardrails is None:
         await save_items(final_turn_items, response_id, store_setting)
     else:
@@ -640,6 +645,10 @@ async def _finalize_streamed_final_output(
             streamed_result.is_complete = True
             streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
             return
+    # The append and any post-append maintenance both succeeded, so the turn is durable and the
+    # state is open again.
+    if streamed_result._state is not None:
+        streamed_result._state._terminal_unrecoverable = False
 
     streamed_result.final_output = output
     if on_persisted_after_guardrails is not None:
@@ -923,6 +932,7 @@ async def start_streaming(
         streamed_result._reasoning_item_id_policy = resolved_reasoning_item_id_policy
 
         if is_resumed_state and run_state is not None:
+            reject_unrecoverable_terminal_state(run_state)
             await resume_pending_session_write(run_state, session, wrapper=context_wrapper)
             streamed_result._current_turn_persisted_item_count = (
                 run_state._current_turn_persisted_item_count
@@ -1486,58 +1496,63 @@ async def start_streaming(
             if run_state is not None and run_state._pending_input:
                 if run_state._current_step is None:
                     run_state._current_step = NextStepRunAgain()
-                pending_input = run_state.pending_input
-                pending_guardrails = current_agent.input_guardrails + (
-                    run_config.input_guardrails or []
-                )
-                previous_result_count = len(streamed_result.input_guardrail_results)
-                try:
-                    await run_input_guardrails_with_queue(
-                        current_agent,
-                        pending_guardrails,
-                        pending_input,
-                        context_wrapper,
-                        streamed_result,
-                        current_span,
+                while True:
+                    pending_input = run_state.pending_input
+                    if not pending_input:
+                        break
+                    pending_guardrails = current_agent.input_guardrails + (
+                        run_config.input_guardrails or []
                     )
-                finally:
-                    run_state._input_guardrail_results = list(
-                        streamed_result.input_guardrail_results
+                    previous_result_count = len(streamed_result.input_guardrail_results)
+                    try:
+                        await run_input_guardrails_with_queue(
+                            current_agent,
+                            pending_guardrails,
+                            pending_input,
+                            context_wrapper,
+                            streamed_result,
+                            current_span,
+                        )
+                    finally:
+                        run_state._input_guardrail_results = list(
+                            streamed_result.input_guardrail_results
+                        )
+                    tripping_result = next(
+                        (
+                            result
+                            for result in streamed_result.input_guardrail_results[
+                                previous_result_count:
+                            ]
+                            if result.output.tripwire_triggered
+                        ),
+                        None,
                     )
-                tripping_result = next(
-                    (
-                        result
-                        for result in streamed_result.input_guardrail_results[
-                            previous_result_count:
-                        ]
-                        if result.output.tripwire_triggered
-                    ),
-                    None,
-                )
-                if tripping_result is not None:
-                    raise InputGuardrailTripwireTriggered(tripping_result)
+                    if tripping_result is not None:
+                        raise InputGuardrailTripwireTriggered(tripping_result)
 
-                store_setting = current_agent.model_settings.resolve(
-                    run_config.model_settings
-                ).store
-                admission_items = await admit_pending_input(
-                    run_state=run_state,
-                    agent=current_agent,
-                    session=session,
-                    server_conversation_tracker=server_conversation_tracker,
-                    store=store_setting,
-                    wrapper=context_wrapper,
-                )
-                streamed_result._model_input_items.extend(admission_items)
-                streamed_result.new_items.extend(admission_items)
-                if pending_server_items is not None:
-                    pending_server_items.extend(admission_items)
-                pending_input_admission_items = [
-                    item for item in admission_items if isinstance(item, InputItem)
-                ]
-                if not run_state._pending_input:
-                    run_state._generated_items = list(streamed_result._model_input_items)
-                    run_state._session_items = list(streamed_result.new_items)
+                    store_setting = current_agent.model_settings.resolve(
+                        run_config.model_settings
+                    ).store
+                    admission_items = await admit_pending_input(
+                        run_state=run_state,
+                        agent=current_agent,
+                        session=session,
+                        server_conversation_tracker=server_conversation_tracker,
+                        store=store_setting,
+                        wrapper=context_wrapper,
+                    )
+                    streamed_result._model_input_items.extend(admission_items)
+                    streamed_result.new_items.extend(admission_items)
+                    if pending_server_items is not None:
+                        pending_server_items.extend(admission_items)
+                    pending_input_admission_items.extend(
+                        item for item in admission_items if isinstance(item, InputItem)
+                    )
+                    if not run_state._pending_input:
+                        run_state._generated_items = list(streamed_result._model_input_items)
+                        run_state._session_items = list(streamed_result.new_items)
+                    if server_conversation_tracker is not None or not run_state._pending_input:
+                        break
 
             all_tools = await get_all_tools(execution_agent, context_wrapper)
             all_tools = await initialize_computer_tools(
