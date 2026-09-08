@@ -305,6 +305,33 @@ def _build_stream_abort_reconciliation_input(
     return items
 
 
+async def _settle_stream_abort_reconciliation(
+    reconciliation: Awaitable[object],
+) -> None:
+    """Finish reconciliation despite repeated caller cancellation."""
+
+    task = asyncio.ensure_future(reconciliation)
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as error:
+            if cancellation is None:
+                cancellation = error
+
+    try:
+        task.result()
+    except Exception as error:
+        log_model_action_debug(
+            logger,
+            "Ignoring Responses stream-abort reconciliation failure",
+            error,
+        )
+
+    if cancellation is not None:
+        raise cancellation from None
+
+
 async def _no_stream_cleanup() -> None:
     """Provide a no-op cleanup callback for an externally owned stream."""
 
@@ -818,33 +845,30 @@ class OpenAIResponsesModel(Model):
                     close_stream_in_background = True
                     self._schedule_async_iterator_close(stream)
 
-                    if pending_streamed_function_calls and (conversation_id is not None or previous_response_id is not None):
-                        try:
-                            reconciliation_input = _build_stream_abort_reconciliation_input(
-                                pending_streamed_function_calls
-                            )
-                            continuation_previous_response_id = (
-                                previous_response_id
-                                if conversation_id is not None
-                                else streamed_response_id or previous_response_id
-                            )
-                            await self._client.responses.create(
-                                model=self.model,
-                                input=cast(Any, reconciliation_input),
-                                conversation=conversation_id if conversation_id is not None else omit,
-                                previous_response_id=(
-                                    continuation_previous_response_id
-                                    if continuation_previous_response_id is not None
-                                    else omit
-                                ),
-                                stream=False,
-                            )
-                        except Exception as reconciliation_error:
-                            log_model_action_debug(
-                                logger,
-                                "Ignoring Responses stream-abort reconciliation failure",
-                                reconciliation_error,
-                            )
+                    if pending_streamed_function_calls and (
+                        conversation_id is not None or previous_response_id is not None
+                    ):
+                        reconciliation_input = _build_stream_abort_reconciliation_input(
+                            pending_streamed_function_calls
+                        )
+                        continuation_previous_response_id = (
+                            previous_response_id
+                            if conversation_id is not None
+                            else streamed_response_id or previous_response_id
+                        )
+                        reconciliation = self._client.responses.create(
+                            model=self.model,
+                            input=cast(Any, reconciliation_input),
+                            conversation=conversation_id if conversation_id is not None else omit,
+                            previous_response_id=(
+                                continuation_previous_response_id
+                                if continuation_previous_response_id is not None
+                                else omit
+                            ),
+                            stream=False,
+                        )
+                        await _settle_stream_abort_reconciliation(reconciliation)
+
                     raise
                 finally:
                     if not close_stream_in_background:
