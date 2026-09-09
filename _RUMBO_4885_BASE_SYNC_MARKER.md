@@ -1,1 +1,0 @@
-Temporary synchronization marker for the #4885 validation branch. This file is not intended for upstream contribution.
