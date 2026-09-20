@@ -231,7 +231,8 @@ async def test_runner_pending_input_duplicates_with_supported_sqlalchemy_session
         )
 
     assert effects == ["charged"]
-    assert len(guarded_inputs) == 1
+    assert len(guarded_inputs) == 2
+    assert len(model.calls) == 1
     assert state.pending_input
     durable_after_failure = await session.get_items()
     assert sum(
@@ -249,7 +250,7 @@ async def test_runner_pending_input_duplicates_with_supported_sqlalchemy_session
     )
     assert result.final_output == "Done"
     assert effects == ["charged"]
-    assert len(guarded_inputs) == 2
+    assert len(guarded_inputs) == 3
 
     durable_after_retry = await session.get_items()
     assert sum(
