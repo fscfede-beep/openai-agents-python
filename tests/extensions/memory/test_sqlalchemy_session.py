@@ -236,11 +236,14 @@ async def test_runner_pending_input_session_write_reconciles_after_lost_ack(
     assert effects == ["charged"]
     assert state.pending_input
     durable_after_failure = await session.get_items()
-    assert sum(
-        item.get("content") == "Late input"
-        for item in durable_after_failure
-        if isinstance(item, dict)
-    ) == 1
+    assert (
+        sum(
+            item.get("content") == "Late input"
+            for item in durable_after_failure
+            if isinstance(item, dict)
+        )
+        == 1
+    )
     assert len(model.calls) == 1
 
     assert guardrail_calls == 2
@@ -260,16 +263,22 @@ async def test_runner_pending_input_session_write_reconciles_after_lost_ack(
     assert state.pending_input == []
 
     durable_after_retry = await session.get_items()
-    assert sum(
-        item.get("content") == "Late input"
-        for item in durable_after_retry
-        if isinstance(item, dict)
-    ) == 1
-    assert sum(
-        item.get("content") == "Late input"
-        for item in cast(list[TResponseInputItem], model.calls[-1].input)
-        if isinstance(item, dict)
-    ) == 1
+    assert (
+        sum(
+            item.get("content") == "Late input"
+            for item in durable_after_retry
+            if isinstance(item, dict)
+        )
+        == 1
+    )
+    assert (
+        sum(
+            item.get("content") == "Late input"
+            for item in cast(list[TResponseInputItem], model.calls[-1].input)
+            if isinstance(item, dict)
+        )
+        == 1
+    )
 
     await engine.dispose()
 
