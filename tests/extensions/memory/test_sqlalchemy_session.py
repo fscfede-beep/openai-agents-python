@@ -174,8 +174,9 @@ async def test_runner_pending_input_replays_after_sqlalchemy_post_commit_ack_los
     guarded_inputs: list[list[TResponseInputItem]] = []
     effects: list[str] = []
     simulate_ack_loss = False
+    sync_session_class = session._session_factory.class_.sync_session_class
 
-    @event.listens_for(session._session_factory.class_.sync_session_class, "after_commit")
+    @event.listens_for(sync_session_class, "after_commit")
     def _raise_after_commit(sync_session: Any) -> None:
         nonlocal simulate_ack_loss
         if sync_session.bind is engine.sync_engine and simulate_ack_loss:
