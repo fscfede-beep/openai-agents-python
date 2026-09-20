@@ -23,7 +23,7 @@ from sqlalchemy.sql import Select
 
 pytest.importorskip("sqlalchemy")  # Skip tests if SQLAlchemy is not installed
 
-from agents import Agent, RunConfig, Runner, TResponseInputItem, function_tool
+from agents import Agent, RunConfig, Runner, RunState, TResponseInputItem, function_tool
 from agents.extensions.memory.sqlalchemy_session import SQLAlchemySession
 from agents.guardrail import GuardrailFunctionOutput, InputGuardrail
 from agents.testing import ScriptedModel
