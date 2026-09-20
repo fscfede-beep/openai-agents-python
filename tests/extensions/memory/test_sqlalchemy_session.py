@@ -24,6 +24,7 @@ from sqlalchemy.sql import Select
 pytest.importorskip("sqlalchemy")  # Skip tests if SQLAlchemy is not installed
 
 from agents import Agent, RunConfig, Runner, RunState, TResponseInputItem, function_tool
+from agents.run_state import _build_run_state_from_json
 from agents.extensions.memory.sqlalchemy_session import SQLAlchemySession
 from agents.guardrail import GuardrailFunctionOutput, InputGuardrail
 from agents.testing import ScriptedModel
@@ -241,7 +242,11 @@ async def test_runner_pending_input_session_write_reconciles_after_lost_ack(
     assert len(model.calls) == 1
 
     if round_trip:
-        state = await RunState.from_json(agent, state.to_json())
+        payload = state.to_json()
+        try:
+            state = await _build_run_state_from_json(agent, payload)
+        except BaseException as exc:
+            raise AssertionError(f"{type(exc).__name__}: {exc}") from exc
 
     result = await Runner.run(
         agent,
