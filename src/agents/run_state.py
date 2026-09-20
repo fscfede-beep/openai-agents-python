@@ -1022,6 +1022,13 @@ class RunState(Generic[TContext, TAgent]):
 
     def clear_pending_input(self) -> None:
         """Remove all input staged for the next resumed model call."""
+        if (
+            self._pending_session_write is not None
+            and "pending_input" in self._pending_session_write
+        ):
+            raise UserError(
+                "Cannot clear pending input while its Session write is awaiting reconciliation"
+            )
         self._pending_input = []
 
     def get_interruptions(self) -> list[ToolApprovalItem]:
