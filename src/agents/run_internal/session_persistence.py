@@ -699,7 +699,10 @@ async def save_result_to_session(
             isinstance(item, InputItem) for item in new_items
         ):
             raise UserError("Pending input Session writes must contain only admission items")
-        if resumed_write_state.pending_input[: len(pending_input_snapshot)] != pending_input_snapshot:
+        if (
+            resumed_write_state.pending_input[: len(pending_input_snapshot)]
+            != pending_input_snapshot
+        ):
             raise UserError("Pending input changed before its Session write could be checkpointed")
         if not items_to_save:
             del resumed_write_state._pending_input[: len(pending_input_snapshot)]
@@ -853,7 +856,9 @@ async def resume_pending_session_write(
         if [digest_input_item(item) for item in expected_pending_items] != [
             digest_input_item(item) for item in pending["items"]
         ]:
-            raise UserError("Cannot reconcile the pending Session write: its staged input batch changed.")
+            raise UserError(
+                "Cannot reconcile the pending Session write: its staged input batch changed."
+            )
         prefix = run_state._pending_input[: len(pending_input)]
         if len(prefix) != len(pending_input) or [digest_input_item(item) for item in prefix] != [
             digest_input_item(item) for item in pending_input
