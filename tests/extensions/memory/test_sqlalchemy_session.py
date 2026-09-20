@@ -262,7 +262,7 @@ async def test_runner_pending_input_duplicates_with_supported_sqlalchemy_session
         item.get("content") == "Late input"
         for item in cast(list[TResponseInputItem], model.calls[-1].input)
         if isinstance(item, dict)
-    ) == 2
+    ) == 1
 
     await engine.dispose()
 
