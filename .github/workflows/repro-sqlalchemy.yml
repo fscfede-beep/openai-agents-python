@@ -15,4 +15,4 @@ jobs:
         with:
           version: "0.11.14"
           python-version: "3.13"
-      - run: uv run pytest -q tests/extensions/memory/test_sqlalchemy_session.py -k test_runner_pending_input_replays_after_sqlalchemy_post_commit_ack_loss
+      - run: uv run --extra sqlalchemy pytest -q tests/extensions/memory/test_sqlalchemy_session.py -k test_runner_pending_input_replays_after_sqlalchemy_post_commit_ack_loss
