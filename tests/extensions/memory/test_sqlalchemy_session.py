@@ -23,8 +23,10 @@ from sqlalchemy.sql import Select
 
 pytest.importorskip("sqlalchemy")  # Skip tests if SQLAlchemy is not installed
 
-from agents import Agent, Runner, TResponseInputItem
+from agents import Agent, Runner, TResponseInputItem, function_tool
+from agents.exceptions import UserError
 from agents.extensions.memory.sqlalchemy_session import SQLAlchemySession
+from agents.guardrail import GuardrailFunctionOutput, InputGuardrail
 from agents.testing import ScriptedModel
 from tests.test_responses import get_text_message
 
@@ -151,6 +153,136 @@ async def test_sqlalchemy_session_can_store_non_ascii_without_escaping():
     assert "café" in stored
     assert "\\u00e9" not in stored
     assert await session.get_items() == [item]
+
+
+async def test_runner_pending_input_replays_after_sqlalchemy_post_commit_ack_loss(
+    tmp_path: Path,
+) -> None:
+    """
+    Demonstrate #4775 against the supported SQLAlchemySession backend.
+
+    SQLAlchemy's after_commit hook fires after the database commit. Raising from it models
+    the client losing the acknowledgement after durable commit without replacing the
+    supported Session implementation.
+    """
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / "pending_input.db"}")
+    session = SQLAlchemySession(
+        "sqlalchemy-pending-input",
+        engine=engine,
+        create_tables=True,
+    )
+    guarded_inputs: list[list[TResponseInputItem]] = []
+    effects: list[str] = []
+
+    @event.listens_for(session._session_factory.class_.sync_session_class, "after_commit")
+    def _raise_after_commit(sync_session: Any) -> None:
+        if sync_session.bind is engine.sync_engine and sync_session.info.pop(
+            "simulate_ack_loss", False
+        ):
+            raise RuntimeError("session acknowledgement lost after commit")
+
+    def inspect_pending_input(
+        _context: Any,
+        _agent: Agent[Any],
+        input: str | list[TResponseInputItem],
+    ) -> GuardrailFunctionOutput:
+        guarded_inputs.append(cast(list[TResponseInputItem], input))
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    @function_tool(needs_approval=True)
+    def charge() -> str:
+        effects.append("charged")
+        return "receipt"
+
+    model = ScriptedModel(
+        [
+            [
+                {
+                    "type": "function_call",
+                    "name": "charge",
+                    "arguments": "{}",
+                    "call_id": "charge-1",
+                }
+            ],
+            [{"role": "assistant", "content": "Done"}],
+        ]
+    )
+    agent = Agent(
+        name="payment",
+        model=model,
+        tools=[charge],
+        input_guardrails=[InputGuardrail(guardrail_function=inspect_pending_input)],
+    )
+
+    try:
+        interrupted = await Runner.run(
+            agent,
+            "Charge 7",
+            session=session,
+            run_config=RunConfig(tracing_disabled=True),
+        )
+        assert interrupted.interruptions
+
+        state = interrupted.to_state()
+        state.add_input("Late input")
+        state.approve(state.get_interruptions()[0])
+
+        sync_session_class = session._session_factory.class_.sync_session_class
+        # The hook raises only for the next commit on this exact supported backend.
+        async_session = session._session_factory
+        marker_session = async_session()
+        try:
+            marker_session.sync_session.info["simulate_ack_loss"] = True
+        finally:
+            await marker_session.close()
+
+        with pytest.raises(RuntimeError, match="session acknowledgement lost"):
+            await Runner.run(
+                agent,
+                state,
+                session=session,
+                run_config=RunConfig(tracing_disabled=True),
+            )
+
+        assert effects == []
+        assert len(guarded_inputs) == 1
+        durable_after_failure = await session.get_items()
+        late_count_after_failure = sum(
+            item.get("content") == "Late input"
+            for item in durable_after_failure
+            if isinstance(item, dict)
+        )
+        assert late_count_after_failure == 1
+        assert state.pending_input
+
+        # The acknowledgement failure happened after the database commit, so a retry
+        # against the same supported backend re-enters admission with the item still pending.
+        result = await Runner.run(
+            agent,
+            state,
+            session=session,
+            run_config=RunConfig(tracing_disabled=True),
+        )
+        assert result.final_output == "Done"
+        assert effects == ["charged"]
+        assert len(guarded_inputs) == 2
+
+        durable_after_retry = await session.get_items()
+        late_count_after_retry = sum(
+            item.get("content") == "Late input"
+            for item in durable_after_retry
+            if isinstance(item, dict)
+        )
+        assert late_count_after_retry == 2
+        late_count_in_model_input = sum(
+            item.get("content") == "Late input"
+            for item in cast(list[TResponseInputItem], model.calls[-1].input)
+            if isinstance(item, dict)
+        )
+        assert late_count_in_model_input == 2
+    finally:
+        event.remove(sync_session_class, "after_commit", _raise_after_commit)
+        await engine.dispose()
 
 
 async def test_runner_integration(agent: Agent):
