@@ -281,6 +281,8 @@ _PYDANTIC_PUBLIC_COPY_INSTANCE_ATTRIBUTES = frozenset(
     {"__dict__", "__pydantic_extra__", "__pydantic_fields_set__"}
 )
 _MISSING_CONTEXT_SENTINEL = object()
+
+
 def _validate_pending_session_write_item(item: Any) -> TResponseInputItem:
     """Validate a checkpoint item, including SDK-generated local-shell replay outputs."""
     provider_data: Any = None
