@@ -164,10 +164,7 @@ def test_historical_state_comparison_preserves_json_scalar_types() -> None:
 
 def test_historical_fixture_corpus_matches_supported_schema_versions() -> None:
     assert SOURCES["baseline"] == "v0.19.4"
-    assert (
-        frozenset(SOURCES["versions"])
-        == SUPPORTED_SCHEMA_VERSIONS - {CURRENT_SCHEMA_VERSION}
-    )
+    assert frozenset(SOURCES["versions"]) == SUPPORTED_SCHEMA_VERSIONS - {CURRENT_SCHEMA_VERSION}
     assert all(entry["commit"] for entry in SOURCES["versions"].values())
     assert {entry["version"] for entry in SOURCES["features"]} == {
         version
