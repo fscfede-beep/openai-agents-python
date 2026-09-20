@@ -24,7 +24,6 @@ from sqlalchemy.sql import Select
 pytest.importorskip("sqlalchemy")  # Skip tests if SQLAlchemy is not installed
 
 from agents import Agent, RunConfig, Runner, RunState, TResponseInputItem, function_tool
-from agents.run_state import _build_run_state_from_json
 from agents.extensions.memory.sqlalchemy_session import SQLAlchemySession
 from agents.guardrail import GuardrailFunctionOutput, InputGuardrail
 from agents.testing import ScriptedModel
@@ -170,12 +169,15 @@ async def test_runner_pending_input_session_write_reconciles_after_lost_ack(
     )
     guarded_inputs: list[list[TResponseInputItem]] = []
     effects: list[str] = []
+    guardrail_calls = 0
 
     def inspect_pending_input(
         _context: Any,
         _agent: Agent[Any],
         input: str | list[TResponseInputItem],
     ) -> GuardrailFunctionOutput:
+        nonlocal guardrail_calls
+        guardrail_calls += 1
         guarded_inputs.append(cast(list[TResponseInputItem], input))
         return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
 
@@ -241,12 +243,10 @@ async def test_runner_pending_input_session_write_reconciles_after_lost_ack(
     ) == 1
     assert len(model.calls) == 1
 
+    assert guardrail_calls == 2
+
     if round_trip:
-        payload = state.to_json()
-        try:
-            state = await _build_run_state_from_json(agent, payload)
-        except BaseException as exc:
-            raise AssertionError(f"{type(exc).__name__}: {exc}") from exc
+        state = await RunState.from_json(agent, state.to_json())
 
     result = await Runner.run(
         agent,
@@ -256,6 +256,7 @@ async def test_runner_pending_input_session_write_reconciles_after_lost_ack(
     )
     assert result.final_output == "Done"
     assert effects == ["charged"]
+    assert guardrail_calls == 2
     assert state.pending_input == []
 
     durable_after_retry = await session.get_items()
