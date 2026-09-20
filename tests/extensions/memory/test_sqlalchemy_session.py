@@ -23,10 +23,11 @@ from sqlalchemy.sql import Select
 
 pytest.importorskip("sqlalchemy")  # Skip tests if SQLAlchemy is not installed
 
-from agents import Agent, Runner, TResponseInputItem
+from agents import Agent, RunConfig, Runner, TResponseInputItem, function_tool
 from agents.extensions.memory.sqlalchemy_session import SQLAlchemySession
+from agents.guardrail import GuardrailFunctionOutput, InputGuardrail
 from agents.testing import ScriptedModel
-from tests.test_responses import get_text_message
+from tests.test_responses import get_function_tool_call, get_text_message
 
 # Mark all tests in this file as asyncio
 pytestmark = pytest.mark.asyncio
@@ -151,6 +152,118 @@ async def test_sqlalchemy_session_can_store_non_ascii_without_escaping():
     assert "café" in stored
     assert "\\u00e9" not in stored
     assert await session.get_items() == [item]
+
+
+async def test_runner_pending_input_duplicates_with_supported_sqlalchemy_session_after_lost_ack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reproduce #4775 with the supported SQLAlchemySession backend."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / "pending_input.db"}")
+    session = SQLAlchemySession(
+        "sqlalchemy-pending-input",
+        engine=engine,
+        create_tables=True,
+    )
+    guarded_inputs: list[list[TResponseInputItem]] = []
+    effects: list[str] = []
+
+    def inspect_pending_input(
+        _context: Any,
+        _agent: Agent[Any],
+        input: str | list[TResponseInputItem],
+    ) -> GuardrailFunctionOutput:
+        guarded_inputs.append(cast(list[TResponseInputItem], input))
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    @function_tool
+    def charge() -> str:
+        effects.append("charged")
+        return "receipt"
+
+    model = ScriptedModel(
+        [
+            [
+                get_function_tool_call("charge", "{}", call_id="charge-1"),
+            ],
+            [get_text_message("Done")],
+        ]
+    )
+    agent = Agent(
+        name="payment",
+        model=model,
+        tools=[charge],
+        input_guardrails=[InputGuardrail(guardrail_function=inspect_pending_input)],
+    )
+
+    streamed = Runner.run_streamed(
+        agent,
+        "Charge 7",
+        session=session,
+        run_config=RunConfig(tracing_disabled=True),
+    )
+    async for event in streamed.stream_events():
+        if event.type == "run_item_stream_event" and event.name == "tool_output":
+            streamed.cancel(mode="after_turn")
+
+    state = streamed.to_state()
+    state.add_input("Late input")
+    original_add_items = session.add_items
+    lost_ack = True
+
+    async def add_items_with_lost_ack(items: list[TResponseInputItem]) -> None:
+        nonlocal lost_ack
+        await original_add_items(items)
+        if lost_ack and any(
+            isinstance(item, dict) and item.get("content") == "Late input" for item in items
+        ):
+            lost_ack = False
+            raise RuntimeError("session acknowledgement lost after commit")
+
+    monkeypatch.setattr(session, "add_items", add_items_with_lost_ack)
+
+    with pytest.raises(RuntimeError, match="session acknowledgement lost after commit"):
+        await Runner.run(
+            agent,
+            state,
+            session=session,
+            run_config=RunConfig(tracing_disabled=True),
+        )
+
+    assert effects == ["charged"]
+    assert len(guarded_inputs) == 1
+    assert state.pending_input
+    durable_after_failure = await session.get_items()
+    assert sum(
+        item.get("content") == "Late input"
+        for item in durable_after_failure
+        if isinstance(item, dict)
+    ) == 1
+    assert len(model.calls) == 1
+
+    result = await Runner.run(
+        agent,
+        state,
+        session=session,
+        run_config=RunConfig(tracing_disabled=True),
+    )
+    assert result.final_output == "Done"
+    assert effects == ["charged"]
+    assert len(guarded_inputs) == 2
+
+    durable_after_retry = await session.get_items()
+    assert sum(
+        item.get("content") == "Late input"
+        for item in durable_after_retry
+        if isinstance(item, dict)
+    ) == 2
+    assert sum(
+        item.get("content") == "Late input"
+        for item in cast(list[TResponseInputItem], model.calls[-1].input)
+        if isinstance(item, dict)
+    ) == 2
+
+    await engine.dispose()
 
 
 async def test_runner_integration(agent: Agent):
