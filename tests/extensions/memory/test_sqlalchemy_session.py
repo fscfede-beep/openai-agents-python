@@ -205,8 +205,8 @@ async def test_runner_pending_input_session_write_reconciles_after_lost_ack(
         session=session,
         run_config=RunConfig(tracing_disabled=True),
     )
-    async for event in streamed.stream_events():
-        if event.type == "run_item_stream_event" and event.name == "tool_output":
+    async for stream_event in streamed.stream_events():
+        if stream_event.type == "run_item_stream_event" and stream_event.name == "tool_output":
             streamed.cancel(mode="after_turn")
 
     state = streamed.to_state()
