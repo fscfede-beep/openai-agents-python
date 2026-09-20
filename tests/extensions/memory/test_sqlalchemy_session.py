@@ -165,7 +165,7 @@ async def test_runner_pending_input_replays_after_sqlalchemy_post_commit_ack_los
     the client losing the acknowledgement after durable commit without replacing the
     supported Session implementation.
     """
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / "pending_input.db"}")
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'pending_input.db'}")
     session = SQLAlchemySession(
         "sqlalchemy-pending-input",
         engine=engine,
@@ -173,12 +173,13 @@ async def test_runner_pending_input_replays_after_sqlalchemy_post_commit_ack_los
     )
     guarded_inputs: list[list[TResponseInputItem]] = []
     effects: list[str] = []
+    simulate_ack_loss = False
 
     @event.listens_for(session._session_factory.class_.sync_session_class, "after_commit")
     def _raise_after_commit(sync_session: Any) -> None:
-        if sync_session.bind is engine.sync_engine and sync_session.info.pop(
-            "simulate_ack_loss", False
-        ):
+        nonlocal simulate_ack_loss
+        if sync_session.bind is engine.sync_engine and simulate_ack_loss:
+            simulate_ack_loss = False
             raise RuntimeError("session acknowledgement lost after commit")
 
     def inspect_pending_input(
@@ -227,14 +228,8 @@ async def test_runner_pending_input_replays_after_sqlalchemy_post_commit_ack_los
         state.add_input("Late input")
         state.approve(state.get_interruptions()[0])
 
-        sync_session_class = session._session_factory.class_.sync_session_class
         # The hook raises only for the next commit on this exact supported backend.
-        async_session = session._session_factory
-        marker_session = async_session()
-        try:
-            marker_session.sync_session.info["simulate_ack_loss"] = True
-        finally:
-            await marker_session.close()
+        simulate_ack_loss = True
 
         with pytest.raises(RuntimeError, match="session acknowledgement lost"):
             await Runner.run(
